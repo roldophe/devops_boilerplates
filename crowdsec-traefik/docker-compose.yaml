@@ -1,0 +1,108 @@
+services:
+  traefik:
+    image: traefik:latest
+    container_name: traefik
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - proxy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - CF_DNS_API_TOKEN_FILE=${CF_DNS_API_TOKEN}
+      - TRAEFIK_DASHBOARD_CREDENTIALS=${TRAEFIK_DASHBOARD_CREDENTIALS}
+
+    env_file:
+      - .env
+    volumes:
+      - /etc/localtime:/etc/localtime:ro # Sync container time with host
+      - /var/run/docker.sock:/var/run/docker.sock:ro # Allow Traefik to discover Docker services
+      - ./data/traefik.yml:/etc/traefik/traefik.yml # Custom Traefik configuration
+      - ./data/dynamic.yml:/etc/traefik/dynamic.yml # Dynamic configuration
+      - ./data/traefik/acme.json:/etc/traefik/acme.json # Persist Let's Encrypt certificates
+      - ./data/traefik/logs:/var/log/traefik # Directory for Traefik logs
+    
+    # Traefik uses file-based configuration from traefik.yml
+    
+    labels:
+      - "traefik.enable=true"
+      # HTTP to HTTPS redirect
+      - "traefik.http.routers.traefik-dashboard.entrypoints=web"
+      - "traefik.http.routers.traefik-dashboard.rule=Host(`traefik-dashboard.${DOMAIN}`)"
+      - "traefik.http.routers.traefik-dashboard.middlewares=https-redirect@file"
+      
+      # HTTPS dashboard
+      - "traefik.http.routers.traefik-dashboard-secure.entrypoints=websecure"
+      - "traefik.http.routers.traefik-dashboard-secure.rule=Host(`traefik-dashboard.${DOMAIN}`)"
+      - "traefik.http.routers.traefik-dashboard-secure.middlewares=traefik-auth@docker"
+      - "traefik.http.routers.traefik-dashboard-secure.tls=true"
+      - "traefik.http.routers.traefik-dashboard-secure.tls.certresolver=myresolver"
+      - "traefik.http.routers.traefik-dashboard-secure.service=api@internal"
+      
+      # Middleware definitions
+      - "traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_DASHBOARD_CREDENTIALS}"
+
+  crowdsec:
+    container_name: crowdsec
+    image: crowdsecurity/crowdsec:latest
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges=true
+    networks:
+      - proxy
+    environment:
+      GID: "${GID-1000}"
+      COLLECTIONS: "crowdsecurity/linux crowdsecurity/traefik crowdsecurity/http-cve crowdsecurity/whitelist-good-actors crowdsecurity/sshd"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./${CROWDSEC_CONFIG_FOLDER}/acquis.yaml:/etc/crowdsec/acquis.yaml
+      - /var/log/auth.log:/var/log/auth.log:ro
+      - /var/log/crowdsec:/var/log/crowdsec:ro
+      - crowdsec-db:/var/lib/crowdsec/data/
+    hostname: crowdsec
+
+  crowdsec-bouncer:
+    container_name: crowdsec-bouncer-traefik
+    image: fbonalair/traefik-crowdsec-bouncer:latest
+    restart: unless-stopped
+    networks:
+      - proxy
+    environment:
+      CROWDSEC_BOUNCER_API_KEY: ${CROWDSEC_BOUNCER_API_KEY}
+      CROWDSEC_AGENT_HOST: crowdsec:8080
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - crowdsec
+    hostname: crowdsec-bouncer-traefik
+
+  # Example protected service
+  whoami:
+    image: traefik/whoami
+    container_name: whoami
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      
+      # HTTP to HTTPS redirect
+      - "traefik.http.routers.whoami-http.entrypoints=web"
+      - "traefik.http.routers.whoami-http.rule=Host(`whoami.${DOMAIN}`)"
+      - "traefik.http.routers.whoami-http.middlewares=https-redirect@file"
+      
+      # HTTPS with CrowdSec protection
+      - "traefik.http.routers.whoami.entrypoints=websecure"
+      - "traefik.http.routers.whoami.rule=Host(`whoami.${DOMAIN}`)"
+      - "traefik.http.routers.whoami.middlewares=crowdsec-bouncer@file,default-security@file"
+      - "traefik.http.routers.whoami.tls=true"
+      - "traefik.http.routers.whoami.tls.certresolver=myresolver"
+
+networks:
+  proxy:
+    external: true
+
+volumes:
+  crowdsec-db:

@@ -1,0 +1,76 @@
+
+services:
+  traefik:
+    image: traefik:v3.5
+    container_name: traefik
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true # Enhance security by preventing privilege escalation
+    networks:
+      - proxy # Use an existing network or create a new one
+
+    ports:
+      - "80:80"   # HTTP entrypoint
+      - "443:443" # HTTPS entrypoint
+    environment:
+      - CF_DNS_API_TOKEN_FILE=${CF_DNS_API_TOKEN}
+      - TRAEFIK_DASHBOARD_CREDENTIALS=${TRAEFIK_DASHBOARD_CREDENTIALS}
+
+    env_file:
+      - .env # Load environment variables from a file
+
+    volumes:
+      - /etc/localtime:/etc/localtime:ro # Sync container time with host
+      - /var/run/docker.sock:/var/run/docker.sock:ro # Allow Traefik to discover Docker services
+      - ./data/traefik.yml:/etc/traefik/traefik.yml # Custom Traefik configuration (optional)
+      - ./data/acme.json:/etc/traefik/acme.json # Persist Let's Encrypt certificates
+      - ./data/traefik_logs:/var/log/traefik # Directory for Traefik logs
+      - ./data/config.yml:/etc/traefik/config.yml:ro # Additional configuration file (optional)
+    
+    command:
+      # Enable the Traefik Dashboard
+      - --api.dashboard=true
+      - --api.insecure=false # Secure the dashboard
+      
+      # Entrypoints for HTTP and HTTPS traffic
+      - --entrypoints.http.address=:80
+      - --entrypoints.https.address=:443
+      
+      # Enable Docker provider for automatic service discovery
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+
+      # ACME Certificate Resolver (this enables auto-renewal)
+      - --certificatesresolvers.myresolver.acme.email=khoemradom8212@gmail.com
+      - --certificatesresolvers.myresolver.acme.storage=/etc/traefik/acme.json
+      - --certificatesresolvers.myresolver.acme.dnschallenge=true
+      - --certificatesresolvers.myresolver.acme.dnschallenge.provider=cloudflare
+      - --certificatesresolvers.myresolver.acme.dnschallenge.delayBeforeCheck=0
+      
+      # Enable logging
+      - --log.level=INFO
+      - --accesslog=true
+
+    labels:
+      - "traefik.enable=true"
+      # HTTP to HTTPS redirect
+      - "traefik.http.routers.traefik-dashboard.entrypoints=http"
+      - "traefik.http.routers.traefik-dashboard.rule=Host(`traefik-dashboard.${DOMAIN}`)"
+      - "traefik.http.routers.traefik-dashboard.middlewares=traefik-https-redirect"
+      
+      # HTTPS dashboard
+      - "traefik.http.routers.traefik-dashboard-secure.entrypoints=https"
+      - "traefik.http.routers.traefik-dashboard-secure.rule=Host(`traefik-dashboard.${DOMAIN}`)"
+      - "traefik.http.routers.traefik-dashboard-secure.middlewares=traefik-auth"
+      - "traefik.http.routers.traefik-dashboard-secure.tls=true"
+      - "traefik.http.routers.traefik-dashboard-secure.tls.certresolver=myresolver"
+      - "traefik.http.routers.traefik-dashboard-secure.service=api@internal"
+      
+      # Middlewares
+      - "traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_DASHBOARD_CREDENTIALS}"
+      - "traefik.http.middlewares.traefik-https-redirect.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.traefik-https-redirect.redirectscheme.permanent=true"
+
+networks:
+  proxy:
+    external: true
